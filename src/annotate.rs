@@ -2,11 +2,15 @@
 //! genomic-feature category per peak, following ChIPseeker `annotatePeak`
 //! (level="transcript", default tssRegion = (-3000, 3000)).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rsomics_intervals::{Interval, IntervalIndex, IntervalSet, Strand};
 
 use crate::model::{GeneModel, Region, Transcript};
+
+/// `(chrom, start, end)` → index of the first region with those coordinates,
+/// to recover an overlapping region in O(1) instead of scanning all regions.
+type PosMap = HashMap<(String, u64, u64), usize>;
 
 pub const DOWNSTREAM_MAX: i64 = 300;
 
@@ -63,7 +67,9 @@ pub struct Annotator<'m> {
     model: &'m GeneModel,
     tss_by_chrom: BTreeMap<&'m str, Vec<usize>>,
     exon_index: IntervalIndex,
+    exon_pos: PosMap,
     intron_index: IntervalIndex,
+    intron_pos: PosMap,
     utr5_index: IntervalIndex,
     utr3_index: IntervalIndex,
     promoter_up: i64,
@@ -85,7 +91,9 @@ impl<'m> Annotator<'m> {
             model,
             tss_by_chrom,
             exon_index: build_index(&model.exons),
+            exon_pos: build_pos_map(&model.exons),
             intron_index: build_index(&model.introns),
+            intron_pos: build_pos_map(&model.introns),
             utr5_index: build_index(&model.utr5),
             utr3_index: build_index(&model.utr3),
             promoter_up: tss_region.0,
@@ -115,32 +123,22 @@ impl<'m> Annotator<'m> {
         })
     }
 
-    /// Among the transcript whose TSS precedes the peak and the one whose TSS
-    /// follows, pick the smaller |distance|; ties go upstream (first index).
+    /// The transcript with the smallest |distance| among the one just upstream of
+    /// the peak, every transcript whose TSS the peak spans, and the one just
+    /// downstream. Ties go upstream (lowest genomic TSS, the first candidate).
     fn nearest_transcript(&self, peak: &Peak) -> Option<Nearest> {
         let order = self.tss_by_chrom.get(peak.chrom.as_str())?;
-        let pos = peak.start;
+        let txs = &self.model.transcripts;
+        let lo = order.partition_point(|&i| txs[i].tss < peak.start);
+        let hi = order.partition_point(|&i| txs[i].tss <= peak.end);
+        let start = lo.saturating_sub(1);
+        let end = (hi + 1).min(order.len());
 
-        // Partition by genomic TSS position; the candidates are the transcripts
-        // straddling the peak start.
-        let split = order.partition_point(|&i| self.model.transcripts[i].tss <= pos);
-
-        let mut candidates: Vec<usize> = Vec::with_capacity(2);
-        if split > 0 {
-            candidates.push(order[split - 1]);
-        }
-        if split < order.len() {
-            candidates.push(order[split]);
-        }
-
-        candidates
-            .into_iter()
-            .map(|ti| {
-                let t = &self.model.transcripts[ti];
-                Nearest {
-                    tx_idx: ti,
-                    distance: signed_distance(peak.start, peak.end, t.tss, t.strand),
-                }
+        order[start..end]
+            .iter()
+            .map(|&ti| Nearest {
+                tx_idx: ti,
+                distance: signed_distance(peak.start, peak.end, txs[ti].tss, txs[ti].strand),
             })
             .min_by_key(|n| n.distance.abs())
     }
@@ -151,16 +149,21 @@ impl<'m> Annotator<'m> {
         if distance >= self.promoter_up && distance <= self.promoter_down {
             return promoter_label(distance);
         }
-        if first_overlap(&self.utr5_index, &self.model.utr5, peak).is_some() {
+        if overlaps_any(&self.utr5_index, peak) {
             return "5' UTR".to_string();
         }
-        if first_overlap(&self.utr3_index, &self.model.utr3, peak).is_some() {
+        if overlaps_any(&self.utr3_index, peak) {
             return "3' UTR".to_string();
         }
-        if let Some(r) = first_overlap(&self.exon_index, &self.model.exons, peak) {
+        if let Some(r) = lookup_region(&self.exon_index, &self.exon_pos, &self.model.exons, peak) {
             return feature_label("Exon", "exon", r);
         }
-        if let Some(r) = first_overlap(&self.intron_index, &self.model.introns, peak) {
+        if let Some(r) = lookup_region(
+            &self.intron_index,
+            &self.intron_pos,
+            &self.model.introns,
+            peak,
+        ) {
             return feature_label("Intron", "intron", r);
         }
         if let Some(label) = downstream_label(peak, tx) {
@@ -188,23 +191,36 @@ fn build_index(regions: &[Region]) -> IntervalIndex {
     IntervalIndex::build(&set)
 }
 
-/// First region (lowest start) overlapping the peak. The index lookup uses the
-/// peak coordinates; the returned region is resolved from `regions` by position.
-fn first_overlap<'a>(
+fn build_pos_map(regions: &[Region]) -> PosMap {
+    let mut map = PosMap::new();
+    for (i, r) in regions.iter().enumerate() {
+        map.entry((r.chrom.clone(), r.start, r.end)).or_insert(i);
+    }
+    map
+}
+
+/// Whether any region overlaps the peak — the COITree query alone, no back-resolve.
+fn overlaps_any(index: &IntervalIndex, peak: &Peak) -> bool {
+    peak.start < peak.end && !index.query(&peak.chrom, peak.start, peak.end).is_empty()
+}
+
+/// The lowest-`(start, end)` region overlapping the peak, resolved in O(1) via
+/// the position map (the first region carrying those coordinates).
+fn lookup_region<'a>(
     index: &IntervalIndex,
+    pos: &PosMap,
     regions: &'a [Region],
     peak: &Peak,
 ) -> Option<&'a Region> {
     if peak.start >= peak.end {
         return None;
     }
-    let hits = index.query(&peak.chrom, peak.start, peak.end);
-    let lead = hits
+    let lead = index
+        .query(&peak.chrom, peak.start, peak.end)
         .into_iter()
         .min_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)))?;
-    regions
-        .iter()
-        .find(|r| r.chrom == lead.chrom && r.start == lead.start && r.end == lead.end)
+    pos.get(&(peak.chrom.clone(), lead.start, lead.end))
+        .map(|&i| &regions[i])
 }
 
 /// `Downstream (<=300bp)`. ChIPseeker's downstream is genomic, not strand-

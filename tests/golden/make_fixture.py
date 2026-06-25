@@ -40,6 +40,23 @@ for i,(s,e) in enumerate([(83000,84000),(89000,90000)],1):
 for (s,e) in [(83200,84000),(89000,89800)]:
     row("CDS",s,e,"+",'gene_id "GD"; transcript_id "TD2";',frame="0")
 
+# geneH: + strand, two isoforms sharing a far exon (320000-321000) with identical
+# coordinates but distinct TSS — tests the category/gene decoupling at coord-equal exons
+row("gene",300000,321000,"+",'gene_id "GH"; gene_name "GH";')
+row("transcript",300000,321000,"+",'gene_id "GH"; transcript_id "TH1";')
+for i,(s,e) in enumerate([(300000,301000),(320000,321000)],1):
+    row("exon",s,e,"+",f'gene_id "GH"; transcript_id "TH1"; exon_number "{i}";')
+for (s,e) in [(300200,301000),(320000,320800)]:
+    row("CDS",s,e,"+",'gene_id "GH"; transcript_id "TH1";',frame="0")
+row("transcript",310000,321000,"+",'gene_id "GH"; transcript_id "TH2";')
+for i,(s,e) in enumerate([(310000,311000),(320000,321000)],1):
+    row("exon",s,e,"+",f'gene_id "GH"; transcript_id "TH2"; exon_number "{i}";')
+for (s,e) in [(310200,311000),(320000,320800)]:
+    row("CDS",s,e,"+",'gene_id "GH"; transcript_id "TH2";',frame="0")
+# geneI cluster: two close TSS, for a wide peak spanning both
+gene("GI1","TI1","+",400000,405000,[(400000,405000)],[(400200,404800)])
+gene("GI2","TI2","+",402000,407000,[(402000,407000)],[(402200,406800)])
+
 open("anno.gtf","w").write("\n".join(gtf)+"\n")
 
 peaks = [
@@ -59,6 +76,8 @@ peaks = [
     ("pE", 45100,45300),   # GB exon2 far from TSS -> Exon (- strand rank)
     ("pF", 82500,82700),   # between GD TD1(80000)/TD2(83000) TSS, nearer TD2
     ("pG", 80100,80300),   # GD TD1 promoter
+    ("pH", 320400,320600), # GH shared coord-identical exon, far from both TSS -> Exon
+    ("pI", 401000,403000), # 2kb peak spanning GI1(400000)/GI2(402000) TSS -> Promoter dist 0
 ]
 with open("peaks.bed","w") as f:
     for n,s,e in peaks:
