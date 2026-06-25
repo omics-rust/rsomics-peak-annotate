@@ -1,0 +1,26 @@
+[package]
+name = "rsomics-peak-annotate"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Annotate ChIP/ATAC peaks with nearest gene, TSS distance, and genomic-feature category — Rust port of Bioconductor ChIPseeker annotatePeak."
+repository = "https://github.com/omics-rust/rsomics-peak-annotate"
+keywords = ["bioinformatics", "chip-seq", "atac-seq", "annotation", "peaks"]
+categories = ["command-line-utilities", "science"]
+
+[[bin]]
+name = "rsomics-peak-annotate"
+path = "src/main.rs"
+
+[lib]
+name = "rsomics_peak_annotate"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsomics-common = "0.6"
+rsomics-intervals = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
